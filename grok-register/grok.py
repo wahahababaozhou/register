@@ -123,11 +123,12 @@ def register_single_thread():
                 
                 # Step 2: 获取验证码
                 verify_code = None
-                for _ in range(30):
-                    time.sleep(1)
+                for _ in range(12):
+                    time.sleep(5)
                     content = email_service.fetch_first_email(jwt)
                     if content:
-                        match = re.search(r">([A-Z0-9]{3}-[A-Z0-9]{3})<", content)
+                        # 兼容新格式："SZ0-0SW xAI confirmation code" 以及 HTML 中的 "SZ0-0SW"
+                        match = re.search(r"([A-Z0-9]{3}-[A-Z0-9]{3})", content)
                         if match:
                             verify_code = match.group(1).replace("-", "")
                             break
