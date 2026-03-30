@@ -1,3 +1,4 @@
+
 import json
 import os
 import re
@@ -34,6 +35,7 @@ TOKEN_URL = "https://auth.openai.com/oauth/token"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback"
 DEFAULT_SCOPE = "openid email profile offline_access"
+MY_DOMAIN = "e.aibaby.fun"
 
 # ========== 临时邮箱提供商：GPTMail + TempMail.lol ==========
 
@@ -109,110 +111,59 @@ class EMail:
         r.raise_for_status()
         return r.json().get("emails", [])
 
+# ========== 对接本地独立邮箱服务 ==========
 
-def get_email_and_code_fetcher(proxies: Any = None, provider: str = "auto"):
-    provider = (provider or "auto").strip().lower()
-    if provider not in {"auto", "gptmail", "tempmail"}:
-        raise ValueError(f"不支持的邮箱提供商: {provider}")
+def get_email_and_code_fetcher(proxies: Any = None, provider: str = "custom"):
+    # 你的独立邮箱服务地址（由 mail_server.py 提供）
+    MAIL_SERVICE_BASE = "http://127.0.0.1:18001"
 
-    def _build_tempmail_bundle():
-        inbox = EMail(proxies)
-        email = inbox.address
+    # 1. 生成随机邮箱前缀（保持与 mail_server.py 逻辑一致，或者直接在本地生成）
+    # 这里我们沿用脚本配置中的域名 MY_DOMAIN
+    from __main__ import MY_DOMAIN  # 确保主脚本定义了该变量，或者直接写死
+    random_prefix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    email = f"{random_prefix}@{MY_DOMAIN}".lower()
 
-        def _extract_all_codes() -> List[str]:
-            results: List[str] = []
+    password = _gen_password()
+
+    def _extract_all_codes() -> List[str]:
+        """从本地服务查询该邮箱的所有历史 code (可选实现)"""
+        try:
+            resp = py_requests.get(f"{MAIL_SERVICE_BASE}/get_otp", params={"email": email}, timeout=5)
+            data = resp.json()
+            if data.get("code"):
+                return [data["code"]]
+        except:
+            pass
+        return []
+
+    def fetch_code(timeout_sec: int = 180, poll: float = 6.0, exclude_codes: Optional[List[str]] = None) -> str | None:
+        """核心轮询逻辑：向本地 Flask 服务索要验证码"""
+        exclude = set(exclude_codes or [])
+        start = time.monotonic()
+        attempt = 0
+
+        print(f"[*] 等待邮件送达自定义邮箱: {email}")
+
+        while time.monotonic() - start < timeout_sec:
+            attempt += 1
             try:
-                msgs = inbox._get_messages()
-                for msg_data in msgs:
-                    msg = Message(msg_data)
-                    body = msg.body or msg.html_body or msg.subject or ""
-                    results.extend(re.findall(r"\b(\d{6})\b", body))
-            except Exception:
-                pass
-            return results
+                # 请求本地 mail_server.py 的 get_otp 接口
+                resp = py_requests.get(f"{MAIL_SERVICE_BASE}/get_otp", params={"email": email}, timeout=5)
+                data = resp.json()
 
-        def fetch_code(timeout_sec: int = 180, poll: float = 6.0, exclude_codes: Optional[List[str]] = None) -> str | None:
-            exclude = set(exclude_codes or [])
-            start = time.monotonic()
-            attempt = 0
-            while time.monotonic() - start < timeout_sec:
-                attempt += 1
-                try:
-                    msgs = inbox._get_messages()
-                    print(f"[otp][tempmail] 轮询 #{attempt}, 收到 {len(msgs)} 封邮件, 目标: {email}")
-                    for msg_data in msgs:
-                        msg = Message(msg_data)
-                        body = msg.body or msg.html_body or msg.subject or ""
-                        for code in re.findall(r"\b(\d{6})\b", body):
-                            if code not in exclude:
-                                return code
-                except Exception:
-                    pass
-                time.sleep(poll)
-            return None
+                code = data.get("code")
+                if code and code not in exclude:
+                    return code
 
-        return email, _gen_password(), fetch_code, _extract_all_codes, "tempmail"
+                if attempt % 5 == 0:
+                    print(f"[otp][custom] 轮询 #{attempt}, 目标: {email} 状态: 等待中...")
+            except Exception as e:
+                print(f"[otp][error] 连接本地邮箱服务失败: {e}")
 
-    def _build_gptmail_bundle():
-        client = GPTMailClient(proxies)
-        email = client.generate_email()
+            time.sleep(poll)
+        return None
 
-        def _extract_all_codes() -> List[str]:
-            regex = r"(?<!\d)(\d{6})(?!\d)"
-            results: List[str] = []
-            try:
-                summaries = client.list_emails(email)
-                for s in summaries:
-                    body = " ".join([
-                        str(s.get("subject", "") or ""),
-                        str(s.get("text", "") or ""),
-                        str(s.get("body", "") or ""),
-                        str(s.get("html", "") or ""),
-                        json.dumps(s, ensure_ascii=False),
-                    ])
-                    results.extend(re.findall(regex, body))
-            except Exception:
-                pass
-            return results
-
-        def fetch_code(timeout_sec: int = 180, poll: float = 6.0, exclude_codes: Optional[List[str]] = None) -> str | None:
-            exclude = set(exclude_codes or [])
-            start = time.monotonic()
-            attempt = 0
-            while time.monotonic() - start < timeout_sec:
-                attempt += 1
-                try:
-                    summaries = client.list_emails(email)
-                    print(f"[otp][gptmail] 轮询 #{attempt}, 收到 {len(summaries)} 封邮件, 目标: {email}")
-                    for s in summaries:
-                        body = " ".join([
-                            str(s.get("subject", "") or ""),
-                            str(s.get("text", "") or ""),
-                            str(s.get("body", "") or ""),
-                            str(s.get("html", "") or ""),
-                            json.dumps(s, ensure_ascii=False),
-                        ])
-                        for code in re.findall(r"(?<!\d)(\d{6})(?!\d)", body):
-                            if code not in exclude:
-                                return code
-                except Exception:
-                    pass
-                time.sleep(poll)
-            return None
-
-        return email, _gen_password(), fetch_code, _extract_all_codes, "gptmail"
-
-    if provider == "tempmail":
-        return _build_tempmail_bundle()
-    if provider == "gptmail":
-        return _build_gptmail_bundle()
-
-    try:
-        return _build_tempmail_bundle()
-    except Exception as e:
-        print(f"[邮箱] TempMail.lol 初始化失败，回退 GPTMail: {e}")
-        return _build_gptmail_bundle()
-
+    return email, password, fetch_code, _extract_all_codes, "custom_local_mail"
 # ========== OAuth 核心逻辑 (对齐原版的完美重定向流) ==========
 
 def _gen_password() -> str:
